@@ -1,0 +1,245 @@
+---
+title: "Predicting rental listing interest"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+Data: rental listings of aparments in NY City
+
+Goal: predict level of interests
+
+Some observations/questions raised during data exploration (would need to check in real-world use-case):
+
+- Is target normalised to the same listing period of length (e.g. number of days or weeks)? I suspect not as there is some correlation between listing id and interest level.
+
+- Use at least 2-year of historical data to build model to account for seasonal effects (e.g. school holidays, vacation)
+
+- Should also use out of time sampling and testing
+
+```{r load_data_new, include=FALSE, cache=TRUE}
+#rm(list=ls())
+
+raw <- read_json("../data/train.json")
+raw_test <- read_json("../data/test.json")
+d <- data.frame(raw)
+d_test <- data.frame(raw_test)
+```
+
+## Target
+
+Target distribution shows imbalanced classes.
+
+```{r explore_target}
+table(d$interest_level)
+```
+
+Interest level is quantitative and we can encode the targets as numerical values and build a regression model. Future work.
+
+## Exploratory analysis 
+
+```{r}
+sapply(d, class)
+```
+
+- Train and test period?
+- Identifiers?
+- Missing values? Outliers?
+- Additional features?
+- Features vs. features correlations?
+- Features vs. target correlations?
+
+### Train and test periods
+Train and test in the same periods of 3 months, so there could be information leak due to seasonal effects. Proportion of listings in each month is same in both train and test.
+
+```{r, cache=TRUE}
+min(d$created)
+max(d$created)
+min(d_test$created)
+max(d_test$created)
+
+d <- mutate(d, month_created = month(as_datetime(created)))
+d_test <- mutate(d_test, month_created = month(as_datetime(created)))
+table(d$month_created)
+table(d_test$month_created)
+```
+
+### Identifier features
+
+Listing IDs are identifiers so remove.
+```{r}
+d <- select(d, -listing_id)
+```
+
+### Missing values and outliers?
+
+There are missing values for latitude and longitude (entered as 0), and outliers for prices. Leave them in for now as tree-based model can handle such cases
+```{r}
+summary(select(d, bathrooms, bedrooms, latitude, longitude, price))
+```
+
+```{r}
+sum(d$latitude == 0)
+sum(d$longitude == 0)
+```
+
+### Categorical features
+
+Intuitively we expect manager, buildings, and street address all to be predictive of the target. But they are categorical features with many values. Using them directly may lead to complex model that can overfit, so we try to convert them into vector of real values. **However we must be careful to not leak information from train to validation during cross-validation**, especially for managers / building with few listings. Use threshold to determinte when to use.
+
+```{r}
+length(unique(d$building_id))
+length(unique(d$manager_id))
+length(unique(d$display_address))
+length(unique(d$street_address))
+```
+
+```{r, include=FALSE}
+inspect_categorical_var <- function(d, var) {
+  cnt <- as.data.frame(table(d[[var]]))
+  colnames(cnt) <- c(var, 'n')
+  qplot(x = log(n), data = cnt, geom = 'histogram', binwidth = 1, main=sprintf('histogram of %s counts', var))
+}
+```
+
+In fact, we see that they all exhibit heavy tail distribution, meaning a top few instances have many listings and
+the majority have few listings.
+
+```{r}
+inspect_categorical_var(d, 'building_id')
+inspect_categorical_var(d, 'manager_id')
+inspect_categorical_var(d, 'display_address')
+```
+
+#### Manager
+
+```{r, include=FALSE, cache=TRUE}
+manager_features <- encode_categorical_features(d, 'manager_id', 30, 'mngr')
+```
+
+Build features for each manager in terms of the interest levels to their properties. We see that managers vary in their listing performance, for example
+
+```{r}
+qplot(x = mngr_prop_high, data=manager_features, geom='histogram', binwidth=0.1)
+qplot(x = mngr_prop_low, data=manager_features, geom='histogram', binwidth=0.1)
+```
+
+#### Display address
+
+We expect property location to contribute to interest level. This information is contained in lat and long, but we can also leverage display address to gauge the interest at street level. But to aggregate on street level, we need to see if there are enough houses on street.
+
+```{r, cache=TRUE}
+street_features <- dplyr::count(d, display_address)
+summary(street_features$n)
+print('top 10% percentile street')
+quantile(street_features$n, 0.9)
+```
+
+So 10% of streets have at least 10 houses, we may build features for these top streets.
+
+### Geo-spatial
+
+We zoom in in the centre. 
+```{r}
+d_zoom <- d %>% filter(longitude > -74.5 & longitude < -73.5 & latitude > 40.5 & latitude < 41)
+ggplotly(ggplot(d_zoom, aes(longitude, latitude)) + geom_jitter(aes(color = interest_level), alpha=0.5, size=0.2))
+```
+
+Looking at density on each dimension we see that there are relatively higher concentration of high interest properties near the edge.
+```{r}
+ggplot(d_zoom, aes(x = latitude, color=interest_level)) + geom_density()
+ggplot(d_zoom, aes(x = longitude, color=interest_level)) + geom_density()
+```
+
+Can also look at medium and high only, but same information as prev plots.
+
+```{r}
+ggplotly(filter(d_zoom, interest_level != 'low') %>% ggplot(aes(longitude, latitude)) + geom_jitter(aes(color = interest_level), alpha=0.5, size=0.5))
+```
+
+### Augmenting features
+
+We augement features with manager, street, and building features.
+
+### Correlations
+
+Interest levels are ordinal, so convert to -2, 0, 2 and plot correlations. The newly features correlate much stronger to the target than original features.
+
+```{r, include=FALSE, cache=TRUE}
+library(caret)
+set.seed(1110)
+d <- raw %>% add_date_time()
+d_test <- raw_test %>% add_date_time()
+train_ind <- createDataPartition(y = d$interest_level, p = .75, list = FALSE)
+d_train <- d[train_ind,]
+d_val <- d[-train_ind,]
+
+# build these features off training data only
+lim <- 30
+manager_features <- encode_categorical_features(d_train, 'manager_id', lim, 'mngr')
+street_features <- encode_categorical_features(d_train, 'display_address', lim, 'street')
+building_features <- encode_categorical_features(d_train, 'building_id', lim, 'bld')
+street_price_features <- price_features(d_train, 'display_address', lim, 'street')
+bld_price_features <- price_features(d_train, 'building_id', lim, 'bld')
+d_train <- preprocess_numeric(d_train, is_test = FALSE)
+d_val <- preprocess_numeric(d_val, is_test = FALSE)
+```
+
+```{r}
+d2 <- mutate(d_train, interest = ifelse(interest_level == 'high', 2, ifelse(interest_level == 'medium', 1, 0)))
+numeric_features <- names(d2)[which(sapply(d2, is.numeric) | sapply(d2, is.integer))]
+cor(select(d2, one_of(numeric_features[1:10]), interest),
+    method = "spearman", use="pairwise.complete.obs") %>% corrplot(method = "number")
+cor(select(d2, one_of(numeric_features[11:20]), interest),
+    method = "spearman", use="pairwise.complete.obs") %>% corrplot(method = "number")
+cor(select(d2, one_of(numeric_features[21:39]), interest),
+    method = "spearman", , use="pairwise.complete.obs") %>% corrplot(method = "number")
+```
+
+### Building model - first pass
+
+Let's build a first pass model using numerical features only. We can deal with text features later and ensemble the models.
+
+**Since data is very imbalanced, we should use xgboost with case weights**
+
+The CV error:
+
+```{r training, cache=TRUE}
+params <- list(eta = 0.2, gamma = 0, max_depth = 6, min_child_weight = 2,
+               subsample = 1, colsample_bytree = 0.7,
+               num_class = 3, objective = "multi:softprob", eval_metric = "mlogloss")
+xgb_d_train <- xgb.DMatrix(data.matrix(select(d_train, -interest_level)),
+                           label=to_numeric(d_train$interest_level),
+                           #weight=case_weights(d_train$interest_level),
+                           missing=NA)
+xgb_d_val <- xgb.DMatrix(as.matrix(select(d_val, -interest_level)),
+                         label=to_numeric(d_val$interest_level), missing=NA)
+
+xgb_cv <- xgb.cv(params, xgb_d_train, nfold = 5, nrounds = 200, early.stop.round = 3, nthread = 4)
+```
+
+```{r, echo=TRUE}
+xgb_model <- xgb.train(params, xgb_d_train, 
+                       nrounds = 500, early.stop.round = 3, nthread = 4,
+                       watchlist = list(val = xgb_d_val))
+```
+
+```{r var_importance}
+importance <- xgb.importance(feature_names = colnames(d_train), model = xgb_model)
+xgb.plot.importance(importance)
+#plot(varImp(xgb_model))
+```
+
+How well does the model predict?
+
+```{r}
+val_prob <- matrix(predict(xgb_model, xgb_d_val), ncol = 3, byrow=T) %>% data.frame()
+colnames(val_prob) <- c("low", "medium", "high")
+val_prob <- data.frame(high = val_prob$high, low=val_prob$low, medium=val_prob$medium)
+val_label <- probs_to_label(val_prob)$label
+confusionMatrix(d_val$interest_level, val_label)
+sprintf("log loss = %.4f", logloss(d_val$interest_level, val_prob))
+```
+
+Model is predicting high & low better than medium, even though high has much lower prevalence (only 4%). But this makes sense as we found in our prior analysis that there are few features that distinguish high from low and medium. Might perform even better with one vs. all.
+
