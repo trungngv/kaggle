@@ -19,7 +19,7 @@ d_val <- d[-train_ind,]
 registerDoParallel(4)
 getDoParWorkers()
 params <- list(eta = .03, gamma = 1, max_depth = 4, min_child_weight = 1,
-               subsample = .7, colsample_bytree = .7,
+               subsample = .7, colsample_bytree = .5,
                num_class = 3, objective = "multi:softprob", eval_metric = "mlogloss")
 xgb_d_train <- xgb.DMatrix(data.matrix(select(d_train, -interest_level)),
                             label=to_numeric(d_train$interest_level))

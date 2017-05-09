@@ -298,7 +298,7 @@ multi_classifier <- function(dt, dv, dtest, nrounds, weights=NULL) {
   registerDoParallel(4)
   getDoParWorkers()
   params <- list(eta = .03, gamma = 1, max_depth = 4, min_child_weight = 1,
-                 subsample = .7, colsample_bytree = .7,
+                 subsample = .7, colsample_bytree = .5,
                  num_class = 3, objective = "multi:softprob", eval_metric = "mlogloss")
   if (is.null(weights)) {
     m_dt <- xgb.DMatrix(data.matrix(select(dt, -interest_level)),

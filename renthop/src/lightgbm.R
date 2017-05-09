@@ -15,6 +15,8 @@ raw_test <- read_json("data/test.json")
 
 d <- fread('data/final_train.csv')
 d_test <- fread('data/final_test.csv')
+cat_vars <- c('manager_id', 'building_id', 'display_address', 'street_address', 'latlong',
+              'build_bed', 'display_bed', 'street_bed', 'latlong_bed')
 
 set.seed(1110)
 train_ind <- createDataPartition(y = d$interest_level, p = .75, list = FALSE)
@@ -32,12 +34,12 @@ X_val <- lgb.Dataset(as.matrix(select(d_val, -interest_level)),
                      label=to_numeric(d_val$interest_level))
 params <- list(objective = "multiclass", metric = c("multi_logloss"), num_class = 3, num_leaves=127,
                max_depth=6)
-# 0.5275
+# 0.5275 (no leakage feature), 0.5123 (with leakage), 0.51739 (LB)
 model <- lgb.train(params, data=X_train,
                 nrounds=2000,
                 min_data=1,
                 learning_rate=.03,
-                feature_fraction=.7,
+                feature_fraction=.5,
                 early_stopping_rounds=50,
                 eval_freq=10,
                 valids = list(val = X_val))
@@ -49,7 +51,7 @@ model <- lgb.train(params, data=X,
                    nrounds=model$best_iter,
                    min_data=1,
                    learning_rate=0.03,
-                   feature_fraction=0.7,
+                   feature_fraction=0.5,
                    eval_freq=50,
                    valids = list(tr = X))
 
